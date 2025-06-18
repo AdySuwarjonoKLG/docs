@@ -1,8 +1,193 @@
 <center>
-  <h2></h2>Welcome to Docs page<h2 />
+  <h2>Welcome to Docs page<h2 />
   <hr />
-  <b>under construction</b>
-  <p>
+</center>    
+    <ul><li>SQL Server Managament Studio</li><ul><li>Script Blocking vs Blocked Session</li><ul><li><pre data-lang="sql">		  SELECT
+		      blocked.session_id                  AS BlockedSessionID,
+		      blocked.login_name                  AS BlockedUserLogin,
+		      DB_NAME(blocked_requests.database_id) AS BlockedDatabase,
+		      blocked_requests.start_time         AS BlockedRequestStartTime,
+		      blocked_text.text                   AS BlockedQuery,
+		      OBJECT_NAME(blocked_text.objectid, blocked_requests.database_id) AS BlockedSPName,
+		  
+		      blocking.session_id                 AS BlockingSessionID,
+		      blocking.login_name                AS BlockingUserLogin,
+		      DB_NAME(blocking_requests.database_id) AS BlockingDatabase,
+		      blocking_requests.start_time        AS BlockingRequestStartTime,
+		      blocking_text.text                  AS BlockingQuery,
+		      OBJECT_NAME(blocking_text.objectid, blocking_requests.database_id) AS BlockingSPName,
+		  
+		      blocked_requests.wait_type,
+		  	-- Kategori urgensi berdasarkan wait_type
+		      CASE 
+		          WHEN blocked_requests.wait_type IN ('LCK_M_X', 'PAGEIOLATCH_SH', 'PAGEIOLATCH_EX', 'CXPACKET', 'ASYNC_NETWORK_IO') THEN 'Critical'
+		          WHEN blocked_requests.wait_type IN ('WRITELOG', 'SOS_SCHEDULER_YIELD', 'LATCH_EX', 'LATCH_SH') THEN 'High'
+		          WHEN blocked_requests.wait_type IN ('CXCONSUMER', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Medium'
+		          WHEN blocked_requests.wait_type IN ('BROKER_RECEIVE_WAITFOR', 'SQLTRACE_BUFFER_FLUSH', 'WAITFOR') THEN 'Low'
+		          ELSE 'Informational'
+		      END AS UrgencyLevel,
+		      blocked_requests.wait_time,
+		  	-- Wait time dalam format HH:MM:SS
+		      CONVERT(VARCHAR(8), DATEADD(SECOND, blocked_requests.wait_time / 1000, 0), 108) AS WaitTime_HHMMSS,
+		      blocked_requests.wait_resource
+		  FROM
+		      sys.dm_exec_requests blocked_requests
+		  JOIN
+		      sys.dm_exec_sessions blocked ON blocked.session_id = blocked_requests.session_id
+		  JOIN
+		      sys.dm_exec_requests blocking_requests ON blocked_requests.blocking_session_id = blocking_requests.session_id
+		  JOIN
+		      sys.dm_exec_sessions blocking ON blocking.session_id = blocking_requests.session_id
+		  CROSS APPLY
+		      sys.dm_exec_sql_text(blocked_requests.sql_handle) AS blocked_text
+		  CROSS APPLY
+		      sys.dm_exec_sql_text(blocking_requests.sql_handle) AS blocking_text
+		  --WHERE
+		  --    blocked_requests.blocking_session_id <> 0
+		  ORDER BY
+		      blocked_requests.start_time ASC;
+</pre></li></ul><li>Query Dasar untuk Melihat Aktifitas Saat Ini</li><ul><li><pre data-lang="sql">		  SELECT 
+		      s.session_id,
+		      DB_NAME(r.database_id) AS database_name,
+		      s.is_user_process,
+		      s.login_name,
+		      s.host_name,
+		      --s.program_name,
+		  	-- Extract job name from sysjobs table when it's a SQL Agent job
+		      CASE 
+		          WHEN s.program_name LIKE 'SQLAgent - TSQL JobStep%' THEN
+		              (SELECT name FROM msdb.dbo.sysjobs WHERE job_id = 
+		                  CONVERT(UNIQUEIDENTIFIER, 
+		                      SUBSTRING(s.program_name, 
+		                          CHARINDEX('(Job 0x', s.program_name) + 6, 
+		                          CHARINDEX(' :', s.program_name) - (CHARINDEX('(Job 0x', s.program_name) + 6)
+		                      )
+		                  )
+		              )
+		          ELSE s.program_name
+		  	END AS job_or_program_name,
+		      s.status,
+		      r.start_time,
+		      r.status AS request_status,
+		      r.wait_type,
+		      r.wait_time,
+		      r.blocking_session_id,
+		      SPName = OBJECT_NAME(t.objectid, r.database_id),
+		      t.text AS sql_text,
+		      qp.query_plan
+		  FROM 
+		      sys.dm_exec_sessions s
+		  LEFT JOIN 
+		      sys.dm_exec_requests r ON s.session_id = r.session_id
+		  OUTER APPLY 
+		      sys.dm_exec_sql_text(r.sql_handle) t
+		  OUTER APPLY 
+		      sys.dm_exec_query_plan(r.plan_handle) qp
+		  WHERE 
+		      s.is_user_process = 1
+		  	and wait_time > 0
+		  ORDER BY 
+		      r.wait_time DESC;
+</pre></li></ul><li>Get all temp table in current session</li><ul><li><pre data-lang="sql">		  SELECT 'DROP TABLE ' + LEFT([name], CHARINDEX('__', [name]) -1) + ';'
+		  FROM tempdb.sys.objects
+		  WHERE [name] LIKE '#%'
+		  	AND CHARINDEX('_', [name]) > 0
+		  	AND [type] = 'U'
+		  	AND NOT object_id('tempdb..' + [name]) IS NULL;
+</pre></li></ul><li>Find text in Stored Procedures, View, Trigger, and Function</li><ul><li><pre data-lang="sql">		  DECLARE @SEARCHSTRING VARCHAR(255), @notcontain Varchar(255)
+		  
+		  SELECT @SEARCHSTRING = 'foobar', @notcontain = ''
+		  
+		  SELECT DISTINCT sysobjects.name AS [Object Name] ,
+		  case when sysobjects.xtype = 'P' then 'Stored Proc'
+		  when sysobjects.xtype = 'TF' then 'Function'
+		  when sysobjects.xtype = 'TR' then 'Trigger'
+		  when sysobjects.xtype = 'V' then 'View'
+		  end as [Object Type]
+		  FROM sysobjects,syscomments
+		  WHERE sysobjects.id = syscomments.id
+		  AND sysobjects.type in ('P','TF','TR','V')
+		  AND sysobjects.category = 0
+		  AND CHARINDEX(@SEARCHSTRING,syscomments.text)>0
+		  AND ((CHARINDEX(@notcontain,syscomments.text)=0 
+		  or CHARINDEX(@notcontain,syscomments.text)<>0))
+		  
+</pre></li></ul><li>Find text in db</li><ul><li><pre data-lang="sql">		  DECLARE @SEARCHSTRINGs VARCHAR(255) = 'AR2023-6282'
+		  select bb.name AS [Object Name], 
+		  	'schema' = schema_name(cc.schema_id),
+		  	case when bb.xtype = 'P' then 'Stored Proc'
+		  when bb.xtype = 'TF' then 'Function'
+		  when bb.xtype = 'TR' then 'Trigger'
+		  when bb.xtype = 'V' then 'View'
+		  end as [Object Type]
+		  from syscomments aa
+		  	 left join sysobjects bb
+		  		on aa.id = bb.id
+		  	 left join sys.objects cc
+		  		on cc.object_id = bb.id
+		  where  CHARINDEX(@SEARCHSTRINGs,aa.text)>0
+		  order by 2, 1
+</pre></li></ul><li>Find text in job sql</li><ul><li><pre data-lang="sql">		  DECLARE @s nvarchar(255) = N'%udsp_GetsummaryByDate%';
+		  PRINT (@s)
+		  
+		  SELECT job_name = j.name,
+		         s.step_id,
+		         s.step_name,
+		         j.date_created,
+		         j.date_modified
+		    FROM msdb.dbo.sysjobs AS j
+		    INNER JOIN msdb.dbo.sysjobsteps AS s
+		    ON j.job_id = s.job_id
+		        WHERE s.command   LIKE @s
+		           OR j.name      LIKE @s
+		           OR s.step_name LIKE @s;
+</pre></li></ul><li>Compare antara temp table dan real table</li><ul><li><pre data-lang="sql">		  ;with tblTemp as (
+		    SELECT * 
+		    FROM tempdb.INFORMATION_SCHEMA.COLUMNS 
+		    WHERE OBJECT_ID('tempdb..' + table_name)=OBJECT_ID('tempdb..#wmwhse18_Process_Insert_Interface_Load')
+		  ),
+		  	tblReal as (
+		        SELECT * 
+		        FROM SCPRD.INFORMATION_SCHEMA.COLUMNS 
+		        WHERE TABLE_SCHEMA = 'wmwhse18' and TABLE_NAME = 'process_interface_LD'
+		  )
+		  
+		  	select aa.COLUMN_NAME
+		  		, aa.DATA_TYPE
+		  		, bb.DATA_TYPE
+		  		, aa.CHARACTER_MAXIMUM_LENGTH
+		  		, bb.CHARACTER_MAXIMUM_LENGTH
+		  		, case when aa.CHARACTER_MAXIMUM_LENGTH <> bb.CHARACTER_MAXIMUM_LENGTH then 0 else 1 end as IsSame
+		  	from tblTemp aa
+		  		 join tblReal bb
+		  		 on aa.COLUMN_NAME = bb.COLUMN_NAME
+		  	order by 6
+		  
+</pre></li></ul><li>Lihat detail struktur temp table</li><ul><li><code>EXEC tempdb..sp_help #wmwhse18_Process_Insert_Interface_Load;</code></li></ul><li>Add On</li><ul><li>Poor Man's T-SQL Formatter</li><ul><li>link: <a href="http://architectshack.com/PoorMansTSqlFormatter.ashx#Download_5">http://architectshack.com/PoorMansTSqlFormatter.ashx#Download_5</a></li><li>Issue: SSMS 18.2 extension V1.6.13b does not load 'The 'FormatterPackage' package did not load correctly.'</li><ul><li>Solution: <a href="https://github.com/TaoK/PoorMansTSqlFormatter/issues/234#issuecomment-651070411">https://github.com/TaoK/PoorMansTSqlFormatter/issues/234#issuecomment-651070411</a></li><li>Step by step</li><ul><li>1. C:Program Files (x86)Microsoft SQL Server Management Studio 18Common7IDE</li><li>2. edit file ssms.exe.config</li><li>3. tambahkan pada assemblyBinding:<p>					  <code><dependentAssembly> <assemblyIdentity name="Microsoft.VisualStudio.Shell.12.0" publicKeyToken="b03f5f7f11d50a3a" culture="neutral"/> <bindingRedirect oldVersion="2.0.0.0-15.0.0.0" newVersion="15.0.0.0"/> </dependentAssembly></code><br /></p></li></ul></ul></ul></ul></ul><li>VS</li><ul><li>Pengganti string.format: <code>$@"abc{dinamyc.value}def"</code></li></ul><li>Git</li><ul><li>download changes by commit id:<p>	  <code>git archive --output=..\artifact.zip HEAD $(git show --pretty="" --name-only 3fc28cad)</code><br /></p></li></ul><li>CCMDC</li><ul><li>update data accuration</li><ul><li><pre data-lang="sql">	  select 'Data Before',*
+	  	from AccurationInventoryDC aa
+	  	where whseid = 'wmwhse5' and [date] = '2024-11-21'
+	  	order by 3
+	  
+	  	;with cte_data as (
+	  		SELECT	AREAKEY, [CCKEY], [CCDETAILKEY], [SKU], [LOC], [ADJQTY], STORERKEY, LOT, SYSQTY,QTY, NOTES, ADDDATE, ADDWHO, EDITDATE, EDITWHO, ID,
+	  					CASE WHEN [ADJQTY] = 0 THEN 'FIX' ELSE 'MISS' END [TYPE]
+	  				
+	  		FROM	 wmwhse5.AccurationInventoryDCDetail
+	  		where cast(dateadd(hour, 7, editdate) as date) = '2024-11-21'
+	  		and notes != 'WTW2024-HCI-1101COUNTINGLOC'
+	  	)
+	  	select 'Data After', 'wmwhse5' as whseid, [AREAKEY],
+	  			FIX = SUM(CASE WHEN [TYPE] = 'FIX' THEN 1 ELSE 0 END),
+	  			MISS = SUM(CASE WHEN [TYPE] = 'MISS' THEN 1 ELSE 0 END),
+	  			--[A-FIX] = SUM(CASE WHEN [A-TYPE] = 'FIX' THEN 1 ELSE 0 END),
+	  			--[A-MISS] = SUM(CASE WHEN [A-TYPE] = 'MISS' THEN 1 ELSE 0 END),
+	  			'2024-11-21'
+	  	from cte_data
+	  	GROUP BY [AREAKEY]
+	  	order by 3
+</pre></li></ul></ul><li>Clean & Clean</li><ul><li>Empty trash bin</li><li>Disk Cleanup</li></ul></ul>
+<center>
+    <p>
     @2025
   </p>
 </center>
